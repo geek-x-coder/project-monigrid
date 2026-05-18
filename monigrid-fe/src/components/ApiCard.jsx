@@ -15,6 +15,7 @@ import {
     reorderItems,
 } from "./apiCardHelpers";
 import {
+    DEFAULT_REFRESH_INTERVAL_SEC,
     DEFAULT_WIDGET_FONT_SIZE,
     MAX_REFRESH_INTERVAL_SEC,
     MAX_WIDGET_FONT_SIZE,
@@ -71,7 +72,7 @@ const ApiCardSettingsContainer = ({
         w: currentSize?.w ?? 4,
         h: currentSize?.h ?? 4,
     });
-    const [intervalDraft, setIntervalDraft] = useState(refreshIntervalSec ?? 5);
+    const [intervalDraft, setIntervalDraft] = useState(refreshIntervalSec ?? DEFAULT_REFRESH_INTERVAL_SEC);
     const [titleDraft, setTitleDraft] = useState(title);
     const [endpointDraft, setEndpointDraft] = useState(endpoint);
     const [fontSizeDraft, setFontSizeDraft] = useState(
@@ -81,7 +82,7 @@ const ApiCardSettingsContainer = ({
     useEffect(() => {
         setSizeDraft({ w: currentSize?.w ?? 4, h: currentSize?.h ?? 4 });
     }, [currentSize?.w, currentSize?.h]);
-    useEffect(() => { setIntervalDraft(refreshIntervalSec ?? 5); }, [refreshIntervalSec]);
+    useEffect(() => { setIntervalDraft(refreshIntervalSec ?? DEFAULT_REFRESH_INTERVAL_SEC); }, [refreshIntervalSec]);
     useEffect(() => { setTitleDraft(title); }, [title]);
     useEffect(() => { setEndpointDraft(endpoint); }, [endpoint]);
     useEffect(() => {
@@ -199,13 +200,37 @@ const ApiCard = ({
     const dataRows = useMemo(() => normalizeData(data), [data]);
     const detectedColumns = useMemo(() => getAllColumns(data), [data]);
 
-    // 컬럼 순서/표시 여부는 BE 쿼리(SQL SELECT) 결과 순서를 그대로 따른다.
-    // 사용자가 조절하는 것은 컬럼 너비뿐. user_preferences 의 visibleColumns
-    // 가 남아 있어도 무시한다 (phase 2 revised). 자동 저장 effect 도 제거 —
-    // detectedColumns 가 단일 출처라 user pref 에 굳이 동기화할 필요 없음.
+    // 컬럼 순서/표시 여부는 사용자 개인화 데이터로 user_preferences 에 영속화한다.
+    //   tableSettings.columnOrder    — 감지된 모든 컬럼의 사용자 선호 순서
+    //   tableSettings.visibleColumns — 표시 ON 인 컬럼의 부분 집합
+    // BE 응답에 새 컬럼이 등장하면 orderedColumns 끝에 append, 기존 저장 컬럼이
+    // 더 이상 BE 응답에 없으면 자연 탈락 (detectedColumns 에서 빠짐).
+    const savedColumnOrder = tableSettings?.columnOrder;
+    const savedVisibleColumns = tableSettings?.visibleColumns;
+
     const availableColumns = detectedColumns;
-    const orderedColumns = detectedColumns;
-    const visibleColumns = detectedColumns;
+
+    const orderedColumns = useMemo(() => {
+        const detectedSet = new Set(detectedColumns);
+        let basis = [];
+        if (Array.isArray(savedColumnOrder) && savedColumnOrder.length > 0) {
+            basis = savedColumnOrder.filter((c) => detectedSet.has(c));
+        } else if (Array.isArray(savedVisibleColumns) && savedVisibleColumns.length > 0) {
+            // legacy: columnOrder 없던 시절 저장된 visibleColumns 를 순서 정보로 활용.
+            basis = savedVisibleColumns.filter((c) => detectedSet.has(c));
+        }
+        const seen = new Set(basis);
+        const newCols = detectedColumns.filter((c) => !seen.has(c));
+        return [...basis, ...newCols];
+    }, [detectedColumns, savedColumnOrder, savedVisibleColumns]);
+
+    const visibleColumns = useMemo(() => {
+        if (Array.isArray(savedVisibleColumns) && savedVisibleColumns.length > 0) {
+            const visibleSet = new Set(savedVisibleColumns);
+            return orderedColumns.filter((c) => visibleSet.has(c));
+        }
+        return orderedColumns;
+    }, [orderedColumns, savedVisibleColumns]);
 
     useEffect(() => {
         if (data != null) {
@@ -275,10 +300,15 @@ const ApiCard = ({
     const statusText = statusLabel === "slow-live" ? "live" : statusLabel;
 
     const handleColumnToggle = (column) => {
-        const nextVisibleColumns = visibleColumns.includes(column)
-            ? visibleColumns.filter((item) => item !== column)
-            : [...visibleColumns, column];
-
+        const isCurrentlyVisible = visibleColumns.includes(column);
+        let nextVisibleColumns;
+        if (isCurrentlyVisible) {
+            nextVisibleColumns = visibleColumns.filter((item) => item !== column);
+        } else {
+            // 토글 ON 시 orderedColumns 의 원래 자리로 복귀 (끝에 단순 append X).
+            const nextVisibleSet = new Set([...visibleColumns, column]);
+            nextVisibleColumns = orderedColumns.filter((c) => nextVisibleSet.has(c));
+        }
         onTableSettingsChange({ visibleColumns: nextVisibleColumns });
     };
 
@@ -300,16 +330,16 @@ const ApiCard = ({
 
         const fromIndex = orderedColumns.indexOf(draggingColumn);
         const toIndex = orderedColumns.indexOf(targetColumn);
-        const reorderedColumns = reorderItems(
-            orderedColumns,
-            fromIndex,
-            toIndex,
-        );
-        const nextVisibleColumns = reorderedColumns.filter((column) =>
-            visibleColumns.includes(column),
-        );
+        const reorderedAll = reorderItems(orderedColumns, fromIndex, toIndex);
+        const visibleSet = new Set(visibleColumns);
+        const nextVisibleColumns = reorderedAll.filter((c) => visibleSet.has(c));
 
-        onTableSettingsChange({ visibleColumns: nextVisibleColumns });
+        // columnOrder 는 숨김 컬럼 포함 전체 순서, visibleColumns 는 그 부분집합.
+        // 두 필드 모두 user_preferences 로 영속화.
+        onTableSettingsChange({
+            columnOrder: reorderedAll,
+            visibleColumns: nextVisibleColumns,
+        });
         setDraggingColumn(null);
         setDragOverColumn(null);
     };
@@ -552,7 +582,7 @@ const ApiCard = ({
                         <div className='api-endpoint-info'>
                             <span className='api-endpoint'>{endpoint}</span>
                             <span className='refresh-interval-chip'>
-                                ⏱ {formatInterval(refreshIntervalSec ?? 5)}
+                                ⏱ {formatInterval(refreshIntervalSec ?? DEFAULT_REFRESH_INTERVAL_SEC)}
                             </span>
                         </div>
                         {lastUpdatedAt && (

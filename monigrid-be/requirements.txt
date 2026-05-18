@@ -1,37 +1,56 @@
-# Python 3.13+
-# JAVA_HOME 환경변수 필요 (JDK 11+)
+# -*- coding: utf-8 -*-
+# ============================================================
+# monigrid-be — build / runtime dependencies
+# ------------------------------------------------------------
+# Target Python: 3.13
+# External requirement: JAVA_HOME (JDK 11+) — needed by JPype1
+#                       for JDBC bridge at runtime.
+# Build entry point  : build_backend_exe.bat → pyinstaller monigrid_be.spec
+# ============================================================
 
-# Web framework
+# ── Web framework ───────────────────────────────────────────
 Flask==3.1.3
 flask-cors==6.0.2
 flask-limiter==4.1.1
+# Jinja2 는 Flask 가 끌고 오지만, app/notification/templates.py 에서
+# 직접 import 하므로 명시적으로 고정한다. (의도치 않은 메이저 업그레이드 방지)
+Jinja2==3.1.4
 
-# Production WSGI server (Windows-friendly, used by Windows service deployment)
+# ── Production WSGI server (Windows service 배포용) ─────────
 waitress==3.0.2
 
-# Validation & security
+# ── Validation & security ───────────────────────────────────
 pydantic==2.12.5
 PyJWT==2.12.1
 python-dotenv==1.2.2
 bcrypt==4.2.0
 # Phase 6: Fernet 대칭암호 (notification SMTP 비밀번호 암호 저장)
+# Python 3.13 호환 휠 제공.
 cryptography==42.0.5
 
-# JDBC bridge (JayDeBeApi depends on JPype1)
-# JPype1 1.6.0 segfaults on Windows + Python 3.12 (access violation on `import jpype`).
-# Pin to 1.5.2 until the upstream fix lands.
+# ── JDBC bridge ─────────────────────────────────────────────
+# JayDeBeApi 는 JPype1 에 의존.
+# JPype1 1.6.0 은 Windows + Python 3.12 환경에서 `import jpype` 시
+# access violation segfault 발생 → 1.5.2 로 고정. 1.5.2 는 Python 3.13
+# 휠을 공식 배포한다.
 JayDeBeApi==1.2.3
 JPype1==1.5.2
 
-# SSH remote command execution (server resource monitoring)
-paramiko==4.0.0
+# ── SSH 원격 명령 실행 (server resource monitoring) ─────────
+# paramiko 4.0.0 은 기본 KEX/HostKey 알고리즘 리스트가 좁아져 구버전 sshd
+# (RHEL7 + OpenSSH 7.4 이하 등) 와의 협상이 느려지거나 채널 라이프사이클이
+# 변경되어 SSH 수집 명령이 silently hang 하는 사례가 보고됨. 안정 버전
+# 3.5.1 로 다운그레이드. 4.x 재시도는 모든 대상 sshd 가 modern 알고리즘
+# 지원함을 확인한 뒤로 미룬다.
+paramiko==3.5.1
 
-# WinRM remote command execution (Windows server resource monitoring)
+# ── WinRM 원격 명령 실행 (Windows server resource monitoring) ─
+# pywinrm 은 requests_ntlm 등을 transitively 끌고 오며,
+# monigrid_be.spec 의 hiddenimports 에 명시되어 있다.
 pywinrm==0.4.3
 
-# HTTP client (health-check proxy)
+# ── HTTP client (health-check proxy) ────────────────────────
 requests==2.33.1
 
-# EXE packaging
+# ── EXE packaging ───────────────────────────────────────────
 pyinstaller==6.19.0
-

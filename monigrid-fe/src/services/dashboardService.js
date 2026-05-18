@@ -325,6 +325,12 @@ export const cacheService = {
         });
         return response.data;
     },
+
+    /** Per-endpoint cache health + BE refresh_interval_sec (non-admin readable). */
+    getStatus: async () => {
+        const response = await apiClient.get("/dashboard/cache/status");
+        return response.data;
+    },
 };
 
 // ── Widget configs (BE-central display columns + thresholds) ─────────────────

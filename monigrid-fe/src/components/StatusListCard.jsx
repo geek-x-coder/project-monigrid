@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
+    DEFAULT_REFRESH_INTERVAL_SEC,
     DEFAULT_WIDGET_FONT_SIZE,
     MAX_REFRESH_INTERVAL_SEC,
     MAX_WIDGET_FONT_SIZE,
@@ -50,7 +51,7 @@ const StatusListCard = ({
 }) => {
     const [showSettings, setShowSettings] = useState(false);
     const [sizeDraft, setSizeDraft] = useState({ w: 4, h: 5 });
-    const [intervalDraft, setIntervalDraft] = useState(refreshIntervalSec ?? 5);
+    const [intervalDraft, setIntervalDraft] = useState(refreshIntervalSec ?? DEFAULT_REFRESH_INTERVAL_SEC);
     const [titleDraft, setTitleDraft] = useState(title);
     const [fontSizeDraft, setFontSizeDraft] = useState(
         widgetFontSize ?? DEFAULT_WIDGET_FONT_SIZE,
@@ -102,7 +103,7 @@ const StatusListCard = ({
     }, [currentSize?.w, currentSize?.h]);
 
     useEffect(() => {
-        setIntervalDraft(refreshIntervalSec ?? 5);
+        setIntervalDraft(refreshIntervalSec ?? DEFAULT_REFRESH_INTERVAL_SEC);
     }, [refreshIntervalSec]);
 
     useEffect(() => {
@@ -385,7 +386,7 @@ const StatusListCard = ({
                                 {safeTargetIds.length} targets
                             </span>
                             <span className='refresh-interval-chip'>
-                                ⏱ {formatInterval(refreshIntervalSec ?? 5)}
+                                ⏱ {formatInterval(refreshIntervalSec ?? DEFAULT_REFRESH_INTERVAL_SEC)}
                             </span>
                         </div>
                         {lastUpdatedAt && (

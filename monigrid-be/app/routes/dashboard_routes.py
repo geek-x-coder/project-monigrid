@@ -27,10 +27,14 @@ def register(app, backend, limiter) -> None:
     def dashboard_cache_status():
         """Return per-endpoint cache health: refresh time, duration, row count, errors."""
         snapshot = backend.snapshot_cache_entries()
+        endpoints_by_path = getattr(backend.config, "endpoints_by_path", {}) or {}
 
         entries = []
         for api_id, entry in snapshot.items():
             conn = backend.config.connections.get(entry.connection_id)
+            # FE 위젯이 폴링 주기 floor 를 계산할 때 사용. endpoint 정의가 없으면
+            # (legacy 캐시 잔존 등) None 으로 두면 FE 는 전역 minimum 만 적용한다.
+            ep_def = endpoints_by_path.get(entry.path)
             entries.append({
                 "apiId":                entry.api_id,
                 "path":                 entry.path,
@@ -45,6 +49,7 @@ def register(app, backend, limiter) -> None:
                 "errorDetail":          entry.error_detail,
                 "isTimeout":            entry.is_timeout,
                 "source":               entry.source,
+                "refreshIntervalSec":   ep_def.refresh_interval_sec if ep_def else None,
             })
 
         healthy = sum(1 for e in entries if e["hasData"])

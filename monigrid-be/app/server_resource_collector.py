@@ -60,7 +60,7 @@ _SSH_POOL: dict[tuple[str, int, str], "_PooledSshSession"] = {}
 class _PooledSshSession:
     """Long-lived paramiko SSHClient cached in the module-level pool."""
 
-    def __init__(self, host: str, port: int, username: str, password: str, timeout: int = 5):
+    def __init__(self, host: str, port: int, username: str, password: str, timeout: int = 10):
         import paramiko
         client = paramiko.SSHClient()
         client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
@@ -82,8 +82,8 @@ class _PooledSshSession:
         # Trade-off: if thread A holds the lock for a slow command (up to
         # self._timeout seconds), thread B for the *same host* waits behind it.
         # Worst-case lock-wait for B = self._timeout; B then also runs its own
-        # command, so B's total worst case = 2 * self._timeout (10s at the
-        # default of 5s). At the default polling interval (≥30s) this is
+        # command, so B's total worst case = 2 * self._timeout (20s at the
+        # default of 10s). At the default polling interval (≥60s) this is
         # acceptable. If either constant is tightened, revisit this trade-off.
         # Ghost data (CPU output mixed into disk metrics) is worse than a brief
         # extra delay.
@@ -121,7 +121,7 @@ class _PooledSshSession:
 
 
 def _ssh_pool_acquire(
-    host: str, port: int, username: str, password: str, timeout: int = 5,
+    host: str, port: int, username: str, password: str, timeout: int = 10,
 ) -> tuple["_PooledSshSession | None", "str | None"]:
     """Return a (session, error) pair; one of the two is always None."""
     key = (host, port, username)
@@ -220,7 +220,7 @@ class _SshRunner:
     so the existing collector code's early-exit guard still works.
     """
 
-    def __init__(self, host: str, port: int, username: str, password: str, timeout: int = 5):
+    def __init__(self, host: str, port: int, username: str, password: str, timeout: int = 10):
         self._host = host
         self._port = port
         self._username = username

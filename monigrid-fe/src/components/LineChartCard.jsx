@@ -6,6 +6,7 @@ import {
 } from "../hooks/useLineChartSettings.js";
 import LineChartSettingsModal from "./LineChartSettingsModal.jsx";
 import LineChartBody from "./LineChartBody.jsx";
+import { DEFAULT_REFRESH_INTERVAL_SEC } from "../pages/dashboardConstants";
 import "./ApiCard.css";
 import "./LineChartCard.css";
 
@@ -134,7 +135,7 @@ const LineChartCard = ({
                         <div className='api-endpoint-info'>
                             <span className='api-endpoint'>{endpoint}</span>
                             <span className='refresh-interval-chip'>
-                                ⏱ {formatInterval(refreshIntervalSec ?? 5)}
+                                ⏱ {formatInterval(refreshIntervalSec ?? DEFAULT_REFRESH_INTERVAL_SEC)}
                             </span>
                         </div>
                         {lastUpdatedAt && (

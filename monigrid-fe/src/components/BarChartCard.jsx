@@ -3,6 +3,7 @@ import { formatInterval } from "./widgetUtils.js";
 import { useBarChartSettings } from "../hooks/useBarChartSettings.js";
 import BarChartSettingsModal from "./BarChartSettingsModal.jsx";
 import BarChartBody from "./BarChartBody.jsx";
+import { DEFAULT_REFRESH_INTERVAL_SEC } from "../pages/dashboardConstants";
 import "./ApiCard.css";
 import "./BarChartCard.css";
 
@@ -146,7 +147,7 @@ const BarChartCard = ({
                         <div className='api-endpoint-info'>
                             <span className='api-endpoint'>{endpoint}</span>
                             <span className='refresh-interval-chip'>
-                                ⏱ {formatInterval(refreshIntervalSec ?? 5)}
+                                ⏱ {formatInterval(refreshIntervalSec ?? DEFAULT_REFRESH_INTERVAL_SEC)}
                             </span>
                         </div>
                         {lastUpdatedAt && (

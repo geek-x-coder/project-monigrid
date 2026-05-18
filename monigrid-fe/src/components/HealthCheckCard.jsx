@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from "react";
 import {
+    DEFAULT_REFRESH_INTERVAL_SEC,
     DEFAULT_WIDGET_FONT_SIZE,
     MAX_REFRESH_INTERVAL_SEC,
     MAX_WIDGET_FONT_SIZE,
@@ -38,7 +39,7 @@ const HealthCheckSettingsModal = ({
         w: currentSize?.w ?? 4,
         h: currentSize?.h ?? 4,
     });
-    const [intervalDraft, setIntervalDraft] = useState(refreshIntervalSec ?? 5);
+    const [intervalDraft, setIntervalDraft] = useState(refreshIntervalSec ?? DEFAULT_REFRESH_INTERVAL_SEC);
     const [titleDraft, setTitleDraft] = useState(title);
     const [endpointDraft, setEndpointDraft] = useState(endpoint);
     const [fontSizeDraft, setFontSizeDraft] = useState(
@@ -53,7 +54,7 @@ const HealthCheckSettingsModal = ({
     }, [currentSize?.w, currentSize?.h]);
 
     useEffect(() => {
-        setIntervalDraft(refreshIntervalSec ?? 5);
+        setIntervalDraft(refreshIntervalSec ?? DEFAULT_REFRESH_INTERVAL_SEC);
     }, [refreshIntervalSec]);
 
     useEffect(() => {
@@ -359,7 +360,7 @@ const HealthCheckCard = ({
                         <div className='api-endpoint-info'>
                             <span className='api-endpoint'>{endpoint}</span>
                             <span className='refresh-interval-chip'>
-                                ⏱ {formatInterval(refreshIntervalSec ?? 5)}
+                                ⏱ {formatInterval(refreshIntervalSec ?? DEFAULT_REFRESH_INTERVAL_SEC)}
                             </span>
                         </div>
                         {lastUpdatedAt && (

@@ -28,6 +28,11 @@ monigrid-be/build_output.txt
 monigrid-be/pyinstaller_build.log
 *.spec.bak
 
+# ── pip download cache (오프라인 빌드용 wheel 보관소) ──────────────────────────
+# `pip download -d ./packages -r requirements.txt` 산출물. 크기가 크고 환경
+# 의존적이며 requirements.txt 가 단일 출처라 git 추적 의미가 없다.
+monigrid-be/packages/
+
 # ── Node / Frontend ───────────────────────────────────────────────────────────
 node_modules/
 monigrid-fe/dist/

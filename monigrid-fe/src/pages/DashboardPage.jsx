@@ -11,6 +11,7 @@ import {
 } from "../services/api";
 import {
     alertService,
+    cacheService,
     monitorService,
     widgetConfigService,
 } from "../services/dashboardService";
@@ -29,6 +30,7 @@ import AddApiModal from "./AddApiModal";
 import DashboardSettingsModal from "./DashboardSettingsModal";
 import WidgetRenderer from "./WidgetRenderer";
 import {
+    DEFAULT_DATA_WIDGET_FONT_SIZE,
     DEFAULT_REFRESH_INTERVAL_SEC,
     DEFAULT_WIDGET_FONT_SIZE,
     DEFAULT_WIDGET_LAYOUT,
@@ -48,6 +50,7 @@ import {
 } from "./dashboardConstants";
 import {
     clampValue,
+    computeWidgetIntervalFloor,
     createDefaultApis,
     createStatusListWidget,
     layoutArrayToMap,
@@ -124,6 +127,12 @@ const DashboardPageInner = () => {
     });
     const [monitorTargets, setMonitorTargets] = useState([]);
     const [monitorTargetsError, setMonitorTargetsError] = useState(null);
+    // BE 가 endpoint 당 / monitor target 당 정의한 refresh 주기. 위젯 polling
+    // floor 계산에 쓰임 (handleRefreshIntervalChange 가 사용자 입력을 clamp).
+    // path → seconds.
+    const [beApiByPath, setBeApiByPath] = useState({});
+    // target id → seconds.
+    const [beIntervalsByTargetId, setBeIntervalsByTargetId] = useState({});
     const [fontSizeDraft, setFontSizeDraft] = useState(
         dashboardSettings?.widgetFontSize ?? DEFAULT_WIDGET_FONT_SIZE,
     );
@@ -150,6 +159,52 @@ const DashboardPageInner = () => {
                 "fullscreenchange",
                 handleFullscreenChange,
             );
+        };
+    }, []);
+
+    // 마운트 시 한 번 BE 측 refresh 주기를 로드해 두고, 5분마다 재조회한다.
+    // - /dashboard/cache/status      → endpoint path 별 refreshIntervalSec
+    // - /dashboard/monitor-targets   → monitor target id 별 interval_sec
+    // 두 정보는 사용자가 위젯 settings 모달에서 refresh 주기를 줄일 때
+    // floor 로 사용된다 (handleRefreshIntervalChange).
+    useEffect(() => {
+        let cancelled = false;
+        const loadBeIntervals = async () => {
+            try {
+                const [cacheStatus, targetsResp] = await Promise.all([
+                    cacheService.getStatus().catch(() => null),
+                    monitorService.listTargets().catch(() => null),
+                ]);
+                if (cancelled) return;
+                if (cacheStatus && Array.isArray(cacheStatus.endpoints)) {
+                    const map = {};
+                    for (const ep of cacheStatus.endpoints) {
+                        const sec = Number(ep.refreshIntervalSec);
+                        if (ep.path && Number.isFinite(sec) && sec > 0) {
+                            map[ep.path] = sec;
+                        }
+                    }
+                    setBeApiByPath(map);
+                }
+                if (targetsResp && Array.isArray(targetsResp.targets)) {
+                    const map = {};
+                    for (const t of targetsResp.targets) {
+                        const sec = Number(t.interval_sec ?? t.intervalSec);
+                        if (t.id && Number.isFinite(sec) && sec > 0) {
+                            map[String(t.id)] = sec;
+                        }
+                    }
+                    setBeIntervalsByTargetId(map);
+                }
+            } catch {
+                /* 네트워크 에러는 무시 — floor 가 없으면 전역 MIN 만 적용 */
+            }
+        };
+        loadBeIntervals();
+        const handle = setInterval(loadBeIntervals, 5 * 60 * 1000);
+        return () => {
+            cancelled = true;
+            clearInterval(handle);
         };
     }, []);
 
@@ -430,6 +485,13 @@ const DashboardPageInner = () => {
         const isChartType =
             newApiForm.type === "line-chart" ||
             newApiForm.type === "bar-chart";
+        // table / status-list / server-resource 는 정보 밀도 위주의 표 형태
+        // 위젯이므로 신규 생성 시 dataFontSize 를 10 으로 시드한다.
+        // chart / network-test 는 전역 widgetFontSize 상속.
+        const seedSmallFont =
+            newApiForm.type === WIDGET_TYPE_TABLE ||
+            isStatusListWidget ||
+            isServerResourceWidget;
         const newWidget = {
             id: widgetId,
             type: newApiForm.type,
@@ -442,6 +504,9 @@ const DashboardPageInner = () => {
                 : undefined,
             defaultLayout: nextLayout,
             refreshIntervalSec: DEFAULT_REFRESH_INTERVAL_SEC,
+            dataFontSize: seedSmallFont
+                ? DEFAULT_DATA_WIDGET_FONT_SIZE
+                : undefined,
             // status-list 위젯은 등록된 http_status 모니터 대상 id 목록을 보유한다.
             // (BE 가 주기적으로 폴링한 결과를 monitor-snapshot 으로 가져온다.)
             targetIds: isStatusListWidget ? selectedTargetIds : undefined,
@@ -596,11 +661,22 @@ const DashboardPageInner = () => {
     };
 
     const handleRefreshIntervalChange = (apiId, intervalSec) => {
+        // 위젯이 참조하는 endpoint / monitor target 의 BE 갱신 주기보다 작게
+        // 설정하지 못하도록 floor 를 적용. 매칭되는 BE 정보가 없으면 floor=1
+        // (전역 minimum). max(...) 의 의미: 같은 위젯이 여러 endpoint/target 을
+        // 묶으면 가장 느린 BE 주기에 맞춰야 모두 cached 결과를 받게 된다.
+        const widget = widgets?.find((w) => w.id === apiId);
+        const beFloor = computeWidgetIntervalFloor(
+            widget,
+            beApiByPath,
+            beIntervalsByTargetId,
+        );
+        const lowerBound = Math.max(1, Number.isFinite(beFloor) ? beFloor : 1);
         const normalizedInterval = clampValue(
             intervalSec,
-            1,
+            lowerBound,
             3600,
-            DEFAULT_REFRESH_INTERVAL_SEC,
+            Math.max(DEFAULT_REFRESH_INTERVAL_SEC, lowerBound),
         );
 
         updateWidget(apiId, {

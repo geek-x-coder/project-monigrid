@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import {
+    DEFAULT_REFRESH_INTERVAL_SEC,
     MAX_REFRESH_INTERVAL_SEC,
     MAX_WIDGET_H,
     MAX_WIDGET_W,
@@ -72,7 +73,7 @@ export const useBarChartSettings = ({
     );
     const [titleDraft, setTitleDraft] = useState(title);
     const [endpointDraft, setEndpointDraft] = useState(endpoint);
-    const [intervalDraft, setIntervalDraft] = useState(refreshIntervalSec ?? 5);
+    const [intervalDraft, setIntervalDraft] = useState(refreshIntervalSec ?? DEFAULT_REFRESH_INTERVAL_SEC);
     const [sizeDraft, setSizeDraft] = useState({
         w: currentSize?.w ?? 4,
         h: currentSize?.h ?? 4,
@@ -95,7 +96,7 @@ export const useBarChartSettings = ({
     useEffect(() => setTitleDraft(title), [title]);
     useEffect(() => setEndpointDraft(endpoint), [endpoint]);
     useEffect(
-        () => setIntervalDraft(refreshIntervalSec ?? 5),
+        () => setIntervalDraft(refreshIntervalSec ?? DEFAULT_REFRESH_INTERVAL_SEC),
         [refreshIntervalSec],
     );
     useEffect(

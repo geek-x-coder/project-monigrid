@@ -12,6 +12,7 @@ import { formatErrorMessage } from "../services/http.js";
 import { useDocumentVisible } from "./useDocumentVisible.js";
 import { snapshotKeyForWidget } from "../utils/snapshotKey";
 import { useTimemachine } from "../contexts/TimemachineContext";
+import { DEFAULT_REFRESH_INTERVAL_SEC } from "../pages/dashboardConstants";
 
 // Convert monitor-snapshot rows (BE-collected) into the shape StatusListCard
 // already understands ({items, okCount, failCount}). Mirrors the wire format
@@ -56,7 +57,9 @@ const transformMonitorSnapshotToStatusList = (snapshotResponse) => {
 
 const clampIntervalSec = (value) => {
     const n = Number(value);
-    return Number.isFinite(n) ? Math.min(3600, Math.max(1, Math.floor(n))) : 5;
+    return Number.isFinite(n)
+        ? Math.min(3600, Math.max(1, Math.floor(n)))
+        : DEFAULT_REFRESH_INTERVAL_SEC;
 };
 
 const resolveWidgetType = (widget) => {
@@ -88,7 +91,7 @@ const computeStartDelayMs = (widgetId, intervalSec) => {
 };
 
 const scheduleKeyFor = (widget) => {
-    const intervalSec = clampIntervalSec(widget.refreshIntervalSec ?? 5);
+    const intervalSec = clampIntervalSec(widget.refreshIntervalSec ?? DEFAULT_REFRESH_INTERVAL_SEC);
     // status-list now keys on the registered http_status target id list — the
     // widget pulls a BE-collected snapshot, so re-key whenever the operator
     // adds/removes a target from this widget.
@@ -160,7 +163,7 @@ const useWidgetApiData = (widgets) => {
         controllersRef.current[widgetId] = controller;
         const signal = controller.signal;
 
-        const intervalSec = clampIntervalSec(widget.refreshIntervalSec ?? 5);
+        const intervalSec = clampIntervalSec(widget.refreshIntervalSec ?? DEFAULT_REFRESH_INTERVAL_SEC);
         const requestStartedAt = Date.now();
         const hasPreviousData = resultsRef.current[widgetId]?.data != null;
 
@@ -301,7 +304,7 @@ const useWidgetApiData = (widgets) => {
 
         // Schedule or re-schedule each widget
         widgets.forEach((widget) => {
-            const intervalSec = clampIntervalSec(widget.refreshIntervalSec ?? 5);
+            const intervalSec = clampIntervalSec(widget.refreshIntervalSec ?? DEFAULT_REFRESH_INTERVAL_SEC);
             const key = scheduleKeyFor(widget);
 
             if (scheduleKeyRef.current[widget.id] === key) {
@@ -350,7 +353,7 @@ const useWidgetApiData = (widgets) => {
                     if (timersRef.current[widgetId] !== undefined) {
                         const fails = failureCountRef.current.get(widgetId) || 0;
                         const base = clampIntervalSec(
-                            (widgetsRef.current.find((w) => w.id === widgetId)?.refreshIntervalSec) ?? 5,
+                            (widgetsRef.current.find((w) => w.id === widgetId)?.refreshIntervalSec) ?? DEFAULT_REFRESH_INTERVAL_SEC,
                         );
                         scheduleTick(nextPollDelay(fails, base));
                     }
