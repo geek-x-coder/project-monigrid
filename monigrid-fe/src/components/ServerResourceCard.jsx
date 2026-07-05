@@ -802,6 +802,11 @@ const ServerResourceCard = ({
                 <ServerDetailPopup
                     server={detailServer}
                     history={detailHistory}
+                    // snapshot-mode servers are archived on the BE → the popup
+                    // pulls a real multi-month trend; legacy servers fall back
+                    // to the in-memory history.
+                    sourceId={useSnapshot ? detailServer.id : null}
+                    sourceType='monitor:server_resource'
                     onClose={() => setDetailServerId(null)}
                 />
             )}

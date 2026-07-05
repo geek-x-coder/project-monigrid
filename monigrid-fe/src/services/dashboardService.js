@@ -440,6 +440,23 @@ export const timemachineService = {
         });
         return response.data;
     },
+    /**
+     * Aggregated numeric trend series for one source, auto-resolution (raw for
+     * recent windows, 5-min rollup for older). Feeds the zoomable detail graph.
+     * @returns { resolution, bucketMs, series: {metric: [{ts,avg,min,max,count}]} }
+     */
+    queryRangeAgg: async (
+        { sourceType, sourceId, from, to, maxPoints = 1000, metric } = {},
+        options = {},
+    ) => {
+        const params = { sourceType, sourceId, from, to, maxPoints };
+        if (metric) params.metric = metric;
+        const response = await apiClient.get("/dashboard/timemachine/series/agg", {
+            params,
+            signal: options.signal,
+        });
+        return response.data;
+    },
     /** Store stats (row count, time span, enabled flag). */
     stats: async () => {
         const response = await apiClient.get("/dashboard/timemachine/stats");
