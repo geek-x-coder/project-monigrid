@@ -197,6 +197,67 @@ def register(app, backend, limiter) -> None:
             "sourceType": source_type, "sourceId": source_id,
         }), 200
 
+    @app.route("/dashboard/timemachine/series/agg", methods=["GET"])
+    @require_auth
+    def timemachine_series_agg():
+        """Numeric trend series for one source, auto-selecting raw vs rollup
+        resolution. Feeds the zoomable multi-range detail graph.
+
+        Params: sourceType, sourceId, from, to (ISO/epoch-ms), maxPoints
+        (default 1000), metric (optional filter).
+        Response: { resolution, bucketMs, series: {metric: [{ts,avg,min,max,count}]} }
+        """
+        store = backend.get_timemachine_store()
+        if store is None:
+            return jsonify({"message": "timemachine disabled"}), 503
+
+        source_type = (request.args.get("sourceType") or "").strip()
+        source_id = (request.args.get("sourceId") or "").strip()
+        if not source_type or not source_id:
+            return jsonify({"message": "sourceType, sourceId required"}), 400
+
+        from_ms = _parse_at_ms(request.args.get("from"))
+        to_ms = _parse_at_ms(request.args.get("to"))
+        if from_ms is None or to_ms is None:
+            return jsonify({"message": "from/to required"}), 400
+        if from_ms > to_ms:
+            return jsonify({"message": "from must be <= to"}), 400
+
+        try:
+            max_points = int(request.args.get("maxPoints", "1000"))
+        except (TypeError, ValueError):
+            return jsonify({"message": "maxPoints must be int"}), 400
+
+        metric = (request.args.get("metric") or "").strip() or None
+
+        # Raw-serve window = the configured raw retention (bounds raw decode).
+        # 0/disabled → None, so the store falls back to its 3-day serve cap.
+        try:
+            kv = backend.settings_store.load_scalar_sections() or {}
+            raw_hours = kv.get("timemachine_retention_hours")
+            hours = float(raw_hours) if raw_hours not in (None, "") else _DEFAULT_RETENTION_HOURS
+        except Exception:
+            hours = _DEFAULT_RETENTION_HOURS
+        raw_window_ms = int(hours * 3600 * 1000) if hours > 0 else None
+
+        try:
+            result = store.query_series_auto(
+                source_type=source_type, source_id=source_id,
+                from_ms=from_ms, to_ms=to_ms, max_points=max_points,
+                raw_window_ms=raw_window_ms, metric=metric,
+            )
+        except Exception:
+            backend.logger.exception("timemachine series/agg failed")
+            return jsonify({"message": "series/agg query failed"}), 500
+
+        return jsonify({
+            "sourceType": source_type, "sourceId": source_id,
+            "fromMs": from_ms, "toMs": to_ms,
+            "resolution": result.get("resolution"),
+            "bucketMs": result.get("bucketMs"),
+            "series": result.get("series", {}),
+        }), 200
+
     @app.route("/dashboard/timemachine/retention", methods=["PUT"])
     @require_auth
     @require_admin

@@ -45,7 +45,12 @@ from .utils import get_env
 
 # Phase 3 default — KV scalar overrides at runtime. 0 disables eviction loop.
 _DEFAULT_TIMEMACHINE_RETENTION_HOURS = 72.0
+# Rollup tier retention (downsampled 5-min buckets). Long by design so the
+# 3-month trend graph has data; still tiny on disk (numeric columns only).
+# KV override: timemachine_rollup_retention_days. 0 disables rollup eviction.
+_DEFAULT_TIMEMACHINE_ROLLUP_RETENTION_DAYS = 120.0
 # Retention sweep cadence — every 30 min is plenty for hour-scale windows.
+# The same sweep also advances the rollup (piggybacked, no extra thread).
 _TIMEMACHINE_RETENTION_TICK_SEC = 30 * 60
 
 
@@ -638,20 +643,54 @@ class MonitoringBackend:
     def _timemachine_retention_tick(self) -> None:
         if self._timemachine is None:
             return
+
+        # 1) Roll up settled monitor samples into 5-min buckets BEFORE pruning
+        #    raw, so nothing is lost to retention. Runs regardless of the raw
+        #    retention setting (the rollup tier has its own, longer retention).
+        try:
+            stats = self._timemachine.run_rollup()
+            if stats.get("rows"):
+                self.logger.info(
+                    "Timemachine rollup rows=%d buckets=%d batches=%d",
+                    stats.get("rows"), stats.get("buckets"), stats.get("batches"),
+                )
+        except Exception:
+            self.logger.exception("Timemachine rollup failed")
+
         try:
             kv = self.settings_store.load_scalar_sections() or {}
-            raw = kv.get("timemachine_retention_hours")
-            hours = float(raw) if raw not in (None, "") else _DEFAULT_TIMEMACHINE_RETENTION_HOURS
         except Exception:
-            self.logger.exception(
-                "Timemachine retention KV read failed — applying default %.1fh",
-                _DEFAULT_TIMEMACHINE_RETENTION_HOURS,
+            self.logger.exception("Timemachine retention KV read failed — applying defaults")
+            kv = {}
+
+        # 2) Prune the rollup tier by its own (long) retention.
+        try:
+            rd_raw = kv.get("timemachine_rollup_retention_days")
+            rollup_days = (
+                float(rd_raw) if rd_raw not in (None, "")
+                else _DEFAULT_TIMEMACHINE_ROLLUP_RETENTION_DAYS
             )
+            if rollup_days > 0:
+                rcut = int(time.time() * 1000) - int(rollup_days * 86400 * 1000)
+                r_removed = self._timemachine.prune_rollup_older_than(ts_bucket_ms=rcut)
+                if r_removed:
+                    self.logger.info(
+                        "Timemachine rollup pruned %d buckets (retentionDays=%.1f)",
+                        r_removed, rollup_days,
+                    )
+        except Exception:
+            self.logger.exception("Timemachine rollup prune failed")
+
+        # 3) Prune raw samples by the (short) raw retention.
+        raw = kv.get("timemachine_retention_hours")
+        try:
+            hours = float(raw) if raw not in (None, "") else _DEFAULT_TIMEMACHINE_RETENTION_HOURS
+        except (TypeError, ValueError):
             hours = _DEFAULT_TIMEMACHINE_RETENTION_HOURS
         if hours <= 0:
-            # 0 ⇒ retention disabled. We still keep new writes going so the
-            # admin can flip the value back on without losing the last few
-            # ticks; the next non-zero retention tick will then trim.
+            # 0 ⇒ raw retention disabled. We still keep new writes + rollup
+            # going so the admin can flip the value back on without losing the
+            # last few ticks; the next non-zero retention tick will then trim.
             return
         cutoff_ms = int(time.time() * 1000) - int(hours * 3600 * 1000)
         removed = self._timemachine.prune_older_than(ts_ms=cutoff_ms)

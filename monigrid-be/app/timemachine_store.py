@@ -62,6 +62,43 @@ _DDL = [
 ]
 
 
+# ── Rollup (downsampled tier) ────────────────────────────────────────────────
+# Raw samples (30s monitors / 5s data-api) are kept short-term for high-fidelity
+# replay; older monitor data is aggregated into fixed 5-minute buckets holding
+# numeric metrics only (no JSON payload). A 3-month trend query then reads a few
+# thousand pre-computed rows instead of decompressing hundreds of thousands of
+# blobs. avg is stored as (sum, cnt) so buckets are mergeable across rollup runs.
+_ROLLUP_BUCKET_MS = 5 * 60 * 1000  # 5 minutes
+
+# Trend windows fully within this recent span are served from raw samples
+# (native 30s detail, bucketed down if needed); older windows come from the
+# rollup tier. Also bounds how much raw is ever decoded for one query.
+_RAW_SERVE_WINDOW_MS = 3 * 24 * 3600 * 1000  # 3 days
+
+_ROLLUP_DDL = [
+    """
+    CREATE TABLE IF NOT EXISTS timemachine_rollup (
+        source_type TEXT NOT NULL,
+        source_id   TEXT NOT NULL,
+        metric      TEXT NOT NULL,
+        ts_bucket   INTEGER NOT NULL,   -- floor(ts_ms / bucket) * bucket
+        sum_val     REAL NOT NULL,      -- Σ values in bucket (avg = sum / cnt)
+        min_val     REAL NOT NULL,
+        max_val     REAL NOT NULL,
+        cnt         INTEGER NOT NULL,
+        PRIMARY KEY (source_type, source_id, metric, ts_bucket)
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_tmr_src_ts ON timemachine_rollup (source_type, source_id, ts_bucket)",
+    """
+    CREATE TABLE IF NOT EXISTS timemachine_rollup_meta (
+        k TEXT PRIMARY KEY,
+        v INTEGER NOT NULL
+    )
+    """,
+]
+
+
 class TimemachineStore:
     """Append-only time-series of source samples + per-source latest-at lookup."""
 
@@ -104,6 +141,8 @@ class TimemachineStore:
             except Exception:
                 self._logger.exception("timemachine PRAGMA failed — continuing")
             for stmt in _DDL:
+                self._conn.execute(stmt)
+            for stmt in _ROLLUP_DDL:
                 self._conn.execute(stmt)
             self._logger.info("Timemachine store ready path=%s", self._db_path)
 
@@ -308,6 +347,315 @@ class TimemachineStore:
             "minTsMs": int(row[1]) if row[1] is not None else None,
             "maxTsMs": int(row[2]) if row[2] is not None else None,
         }
+
+    # ── rollup (downsampled tier) ────────────────────────────────────────
+
+    def _get_meta_locked(self, key: str, default: int) -> int:
+        row = self._conn.execute(
+            "SELECT v FROM timemachine_rollup_meta WHERE k = ?", (key,),
+        ).fetchone()
+        return int(row[0]) if row is not None else default
+
+    def _set_meta_locked(self, key: str, value: int) -> None:
+        self._conn.execute(
+            "INSERT INTO timemachine_rollup_meta (k, v) VALUES (?, ?) "
+            "ON CONFLICT(k) DO UPDATE SET v = excluded.v",
+            (key, int(value)),
+        )
+
+    def run_rollup(
+        self, *, extractor=None, batch_size: int = 5000, max_batches: int = 10000,
+    ) -> dict[str, int]:
+        """Aggregate not-yet-rolled monitor samples into 5-minute buckets.
+
+        Incremental + resumable: advances a rowid watermark so each call only
+        processes samples appended since the last run (rowid, not ts_ms, so the
+        mergeable upsert can never double-count same-millisecond rows). Runs in
+        bounded batches, holding the store lock only for the DB read and upsert
+        — not the zlib-decode/aggregate step — so a large first backfill does
+        not stall background collectors.
+
+        Only ``monitor:*`` sources are rolled up: ``data_api`` payloads are
+        arbitrary JSON with no universal numeric metric.
+        """
+        if self._conn is None:
+            return {"rows": 0, "buckets": 0, "batches": 0}
+        extract = extractor or extract_metrics
+        total_rows = 0
+        total_buckets = 0
+        batches = 0
+        while batches < max_batches:
+            with self._lock:
+                if self._conn is None:
+                    break
+                wm = self._get_meta_locked("rollup_watermark_id", 0)
+                rows = self._conn.execute(
+                    "SELECT id, source_type, source_id, ts_ms, payload "
+                    "FROM timemachine_samples "
+                    "WHERE id > ? AND source_type LIKE 'monitor:%' "
+                    "ORDER BY id ASC LIMIT ?",
+                    (wm, int(batch_size)),
+                ).fetchall()
+            if not rows:
+                break
+            # Decode + aggregate OUTSIDE the lock (the expensive part).
+            acc: dict[tuple, list] = {}
+            max_id = wm
+            for row_id, st, sid, ts_ms, blob in rows:
+                if row_id > max_id:
+                    max_id = row_id
+                metrics = extract(st, _decode_payload(blob))
+                if not metrics:
+                    continue
+                bucket = (int(ts_ms) // _ROLLUP_BUCKET_MS) * _ROLLUP_BUCKET_MS
+                for metric, value in metrics.items():
+                    fv = _num(value)
+                    if fv is None:
+                        continue
+                    key = (st, sid, metric, bucket)
+                    a = acc.get(key)
+                    if a is None:
+                        acc[key] = [fv, fv, fv, 1]
+                    else:
+                        a[0] += fv
+                        if fv < a[1]:
+                            a[1] = fv
+                        if fv > a[2]:
+                            a[2] = fv
+                        a[3] += 1
+            with self._lock:
+                if self._conn is None:
+                    break
+                self._conn.execute("BEGIN")
+                try:
+                    for (st, sid, metric, bucket), (s, mn, mx, cnt) in acc.items():
+                        self._conn.execute(
+                            "INSERT INTO timemachine_rollup "
+                            "(source_type, source_id, metric, ts_bucket, sum_val, min_val, max_val, cnt) "
+                            "VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+                            "ON CONFLICT(source_type, source_id, metric, ts_bucket) DO UPDATE SET "
+                            "sum_val = sum_val + excluded.sum_val, "
+                            "min_val = MIN(min_val, excluded.min_val), "
+                            "max_val = MAX(max_val, excluded.max_val), "
+                            "cnt = cnt + excluded.cnt",
+                            (st, sid, metric, bucket, s, mn, mx, cnt),
+                        )
+                    self._set_meta_locked("rollup_watermark_id", max_id)
+                    self._conn.execute("COMMIT")
+                except Exception:
+                    self._conn.execute("ROLLBACK")
+                    raise
+            total_rows += len(rows)
+            total_buckets += len(acc)
+            batches += 1
+            if len(rows) < batch_size:
+                break
+        return {"rows": total_rows, "buckets": total_buckets, "batches": batches}
+
+    def prune_rollup_older_than(self, *, ts_bucket_ms: int) -> int:
+        """Delete rollup buckets older than ``ts_bucket_ms``. Returns rows removed."""
+        if self._conn is None:
+            return 0
+        try:
+            with self._lock:
+                if self._conn is None:
+                    return 0
+                cur = self._conn.execute(
+                    "DELETE FROM timemachine_rollup WHERE ts_bucket < ?",
+                    (int(ts_bucket_ms),),
+                )
+                return int(cur.rowcount or 0)
+        except Exception:
+            self._logger.exception("timemachine prune_rollup failed")
+            return 0
+
+    def query_series_auto(
+        self, *, source_type: str, source_id: str, from_ms: int, to_ms: int,
+        max_points: int = 1000, raw_window_ms: int | None = None,
+        now_ms: int | None = None, metric: str | None = None, extractor=None,
+    ) -> dict[str, Any]:
+        """Return a numeric trend series for one source, auto-selecting resolution.
+
+        Windows fully within the recent raw-serve span are served from raw
+        samples (native detail, bucketed down to ``max_points`` if needed);
+        older windows are served from the 5-minute rollup tier grouped to a
+        bucket width that keeps the point count under ``max_points``.
+
+        Output: ``{resolution, bucketMs, series: {metric: [{ts, avg, min, max, count}]}}``
+        where ``ts`` is the bucket-start epoch-ms.
+        """
+        now = int(now_ms) if now_ms is not None else int(time.time() * 1000)
+        raw_win = int(raw_window_ms) if raw_window_ms is not None else _RAW_SERVE_WINDOW_MS
+        raw_win = min(max(0, raw_win), _RAW_SERVE_WINDOW_MS)
+        from_ms = int(from_ms)
+        to_ms = int(to_ms)
+        max_points = max(10, min(int(max_points), 5000))
+        if from_ms >= now - raw_win:
+            return self._series_from_raw(
+                source_type=source_type, source_id=source_id,
+                from_ms=from_ms, to_ms=to_ms, max_points=max_points,
+                metric=metric, extract=extractor or extract_metrics,
+            )
+        return self._series_from_rollup(
+            source_type=source_type, source_id=source_id,
+            from_ms=from_ms, to_ms=to_ms, max_points=max_points, metric=metric,
+        )
+
+    def _series_from_raw(
+        self, *, source_type, source_id, from_ms, to_ms, max_points, metric, extract,
+    ) -> dict[str, Any]:
+        raw = self.list_samples_range(
+            source_type=source_type, source_id=source_id,
+            from_ms=from_ms, to_ms=to_ms, limit=100_000,
+        )
+        cols: dict[str, list] = {}
+        for item in raw:
+            ts = int(item["tsMs"])
+            for m, v in extract(source_type, item["payload"]).items():
+                if metric and m != metric:
+                    continue
+                fv = _num(v)
+                if fv is None:
+                    continue
+                cols.setdefault(m, []).append((ts, fv))
+        densest = max((len(v) for v in cols.values()), default=0)
+        if densest <= max_points:
+            series = {
+                m: [{"ts": ts, "avg": v, "min": v, "max": v, "count": 1} for ts, v in pts]
+                for m, pts in cols.items()
+            }
+            return {"resolution": "raw", "bucketMs": 0, "series": series}
+        span = max(1, to_ms - from_ms)
+        bucket_ms = max(1000, span // max_points)
+        series = {m: _bucketize(pts, bucket_ms) for m, pts in cols.items()}
+        return {"resolution": "raw", "bucketMs": bucket_ms, "series": series}
+
+    def _series_from_rollup(
+        self, *, source_type, source_id, from_ms, to_ms, max_points, metric,
+    ) -> dict[str, Any]:
+        span = max(1, to_ms - from_ms)
+        target = max(1, span // max_points)
+        mult = max(1, -(-target // _ROLLUP_BUCKET_MS))  # ceil-div
+        bucket_ms = mult * _ROLLUP_BUCKET_MS
+        empty = {"resolution": "rollup", "bucketMs": bucket_ms, "series": {}}
+        if self._conn is None:
+            return empty
+        sql = (
+            "SELECT metric, (ts_bucket / ?) * ? AS b, "
+            "SUM(sum_val), MIN(min_val), MAX(max_val), SUM(cnt) "
+            "FROM timemachine_rollup "
+            "WHERE source_type = ? AND source_id = ? AND ts_bucket BETWEEN ? AND ? "
+        )
+        args = [int(bucket_ms), int(bucket_ms), source_type, source_id,
+                int(from_ms), int(to_ms)]
+        if metric:
+            sql += "AND metric = ? "
+            args.append(metric)
+        sql += "GROUP BY metric, b ORDER BY metric ASC, b ASC"
+        try:
+            with self._lock:
+                if self._conn is None:
+                    return empty
+                rows = self._conn.execute(sql, args).fetchall()
+        except Exception:
+            self._logger.exception("timemachine rollup query failed")
+            return empty
+        series: dict[str, list] = {}
+        for m, b, s, mn, mx, c in rows:
+            c = int(c or 0)
+            series.setdefault(str(m), []).append({
+                "ts": int(b),
+                "avg": (s / c) if c else None,
+                "min": mn, "max": mx, "count": c,
+            })
+        return {"resolution": "rollup", "bucketMs": bucket_ms, "series": series}
+
+
+def _num(value: Any) -> float | None:
+    """Coerce to a finite float, or None (rejects None/bool/NaN/inf/non-numeric)."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return None
+    if f != f or f in (float("inf"), float("-inf")):
+        return None
+    return f
+
+
+def _nested(d: Any, *keys: str) -> Any:
+    cur = d
+    for k in keys:
+        if not isinstance(cur, dict):
+            return None
+        cur = cur.get(k)
+    return cur
+
+
+def _bucketize(points: list, bucket_ms: int) -> list:
+    """Group (ts, value) points into fixed-width buckets → [{ts,avg,min,max,count}]."""
+    acc: dict[int, list] = {}
+    for ts, v in points:
+        b = (int(ts) // bucket_ms) * bucket_ms
+        a = acc.get(b)
+        if a is None:
+            acc[b] = [v, v, v, 1]
+        else:
+            a[0] += v
+            if v < a[1]:
+                a[1] = v
+            if v > a[2]:
+                a[2] = v
+            a[3] += 1
+    return [
+        {"ts": b, "avg": s / c, "min": mn, "max": mx, "count": c}
+        for b, (s, mn, mx, c) in sorted(acc.items())
+    ]
+
+
+def extract_metrics(source_type: str, payload: Any) -> dict[str, float]:
+    """Map a monitor sample payload to a flat {metric: numeric} dict.
+
+    Only monitor sources have well-defined numeric metrics; unknown source
+    types (e.g. ``data_api``) return {} and are skipped by the rollup.
+    """
+    if not isinstance(payload, dict):
+        return {}
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        return {}
+    out: dict[str, float] = {}
+    if source_type == "monitor:server_resource":
+        cpu = _num(_nested(data, "cpu", "usedPct"))
+        if cpu is not None:
+            out["cpu"] = cpu
+        mem = _num(_nested(data, "memory", "usedPct"))
+        if mem is not None:
+            out["mem"] = mem
+        disks = data.get("disks")
+        if isinstance(disks, list):
+            for dk in disks:
+                if not isinstance(dk, dict):
+                    continue
+                pct = _num(dk.get("usedPct"))
+                if pct is None:
+                    continue
+                mount = str(dk.get("mount") or "root")
+                out[f"disk:{mount}"] = pct
+    elif source_type == "monitor:network":
+        rt = _num(data.get("responseTimeMs"))
+        if rt is not None:
+            out["responseTimeMs"] = rt
+        if "success" in data:
+            out["success"] = 1.0 if data.get("success") else 0.0
+    elif source_type == "monitor:http_status":
+        rt = _num(data.get("responseTimeMs"))
+        if rt is not None:
+            out["responseTimeMs"] = rt
+        if "ok" in data:
+            out["up"] = 1.0 if data.get("ok") else 0.0
+    return out
 
 
 def _decode_payload(blob: Any) -> Any:
