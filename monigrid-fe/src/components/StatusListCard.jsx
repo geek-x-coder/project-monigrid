@@ -60,8 +60,11 @@ const StatusListCard = ({
 
     useEffect(() => {
         // 부모(useWidgetApiData)가 새 결과를 내려줄 때마다 갱신 시각을 저장.
+        // data.checkedAt 가 있으면 그 시각을 쓴다 — 타임머신 모드에서는 스냅샷
+        // 시점, 라이브 모드에서는 수집 시각(≈현재)을 가리킨다.
         if (data != null) {
-            setLastUpdatedAt(new Date());
+            const ts = data.checkedAt ? new Date(data.checkedAt) : new Date();
+            setLastUpdatedAt(Number.isNaN(ts.getTime()) ? new Date() : ts);
         }
     }, [data]);
 

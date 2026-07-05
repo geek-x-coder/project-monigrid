@@ -55,6 +55,43 @@ const transformMonitorSnapshotToStatusList = (snapshotResponse) => {
     };
 };
 
+// TM(타임머신) 모드에서 status-list 위젯의 스냅샷을 합성한다.
+// status-list 는 여러 http_status 모니터 타깃을 하나의 목록으로 묶으므로 단일
+// snapshot key 로 풀 수 없다 (snapshotKey.js 가 null 반환). 대신 각 targetId 의
+// `monitor:http_status|<targetId>` 스냅샷을 모아, 라이브 경로(monitorService
+// .getSnapshot → transformMonitorSnapshotToStatusList)와 동일한 형태로 변환한다.
+// ServerResourceCard / NetworkTestCard 가 카드 레벨에서 하는 다중 타깃 조립을,
+// status-list 는 라이브 데이터도 이 훅을 타므로 훅 레벨에서 수행한다.
+const buildStatusListTmData = (targetIds, snapshotByKey) => {
+    const tids = Array.isArray(targetIds) ? targetIds.filter(Boolean) : [];
+    let hasAny = false;
+    let latestTsMs = null;
+    const entries = tids.map((tid) => {
+        const snap = snapshotByKey.get(`monitor:http_status|${tid}`);
+        if (snap) {
+            hasAny = true;
+            if (snap.tsMs != null && (latestTsMs == null || snap.tsMs > latestTsMs)) {
+                latestTsMs = snap.tsMs;
+            }
+        }
+        // BE _tm_archive_monitor payload: { label, data, errorMessage, spec, ... }
+        const p = snap?.payload || {};
+        return {
+            targetId: tid,
+            label: p.label,
+            spec: p.spec,
+            data: p.data ?? null,
+            errorMessage: snap ? (p.errorMessage ?? null) : "이 시점에 데이터 없음",
+            updatedAt: snap?.tsMs != null ? new Date(snap.tsMs).toISOString() : null,
+        };
+    });
+    const data = transformMonitorSnapshotToStatusList({ items: entries });
+    // TM 모드에서는 카드의 "마지막 갱신 시각"이 현재 시각이 아니라 스냅샷 시점을
+    // 가리키도록 checkedAt 를 최신 스냅샷 ts 로 덮어쓴다.
+    if (latestTsMs != null) data.checkedAt = new Date(latestTsMs).toISOString();
+    return { hasAny, latestTsMs, data };
+};
+
 const clampIntervalSec = (value) => {
     const n = Number(value);
     return Number.isFinite(n) ? Math.min(3600, Math.max(1, Math.floor(n))) : 5;
@@ -444,6 +481,29 @@ const useWidgetApiData = (widgets) => {
         if (!tm.enabled) return null;
         const overridden = {};
         for (const widget of widgets) {
+            // status-list: 다중 http_status 타깃을 합성해야 해서 단일 snapshot key
+            // 로 풀 수 없다. 각 타깃의 monitor:http_status 스냅샷을 모아 라이브와
+            // 동일한 {items, okCount, failCount} 형태로 변환한다 (Track A).
+            if (resolveWidgetType(widget) === "status-list") {
+                const { hasAny, latestTsMs, data } = buildStatusListTmData(
+                    widget.targetIds, tm.snapshotByKey,
+                );
+                const failCount = Number(data?.failCount || 0);
+                const okCount = Number(data?.okCount || 0);
+                overridden[widget.id] = {
+                    id: widget.id,
+                    data: hasAny ? data : null,
+                    // status-list 는 전역 알람(reportWidgetStatus)을 호출하지 않으므로
+                    // 여기서의 status 는 카드 표시용일 뿐 과거 시점 라이브 알람을
+                    // 유발하지 않는다. 라이브 경로와 동일한 판정 규칙을 따른다.
+                    status: hasAny
+                        ? (failCount === 0 ? "live" : okCount > 0 ? "slow-live" : "dead")
+                        : "dead",
+                    error: tm.error || (hasAny ? null : "이 시점에 데이터 없음"),
+                    lastUpdatedAt: latestTsMs,
+                };
+                continue;
+            }
             const key = tm.resolveSnapshotKey ? tm.resolveSnapshotKey(widget) : snapshotKeyForWidget(widget);
             const snap = key ? tm.snapshotByKey.get(key) : null;
             // BE 가 data_api 를 {title, endpoint, data: [...]} 로 wrapping 해서
